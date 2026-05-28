@@ -1,3 +1,6 @@
+# sudo apt install python3-psycopg2   
+# TODO: Replace user login and pass @ feature files
+
 import psycopg2
 from psycopg2 import pool
 from psycopg2.sql import SQL, Identifier
@@ -26,8 +29,11 @@ class Constants:
     AIRC_DEV_PATH = '~/airc-dev/desenv'
     DEFAULT_PROJECT = 'sigr'
     DEFAULT_LOGIN = 'admin@airc.pt'
+    DEFAULT_PASS = 'admin'
     DEFAULT_SCHEMA = 'ME'
     DEFAULT_USER_ID = '185eda4d-8739-4c10-9211-8b8ceff4086d'
+    DEFAULT_E2E_LOGIN = 'admin@airc.pt'
+    DEFAULT_E2E_PASS = 'admin'
     DEFAULT_E2E_SCHEMA = 'airc-management'
     DEFAULT_E2E_USER_ID = 'a144ef55-f943-44a4-8cc1-ca30697fd3e3'
 
@@ -36,7 +42,7 @@ class DatabaseConfig:
         self.keycloak_config = {
             'host': os.getenv('DB_HOST', 'localhost'),
             'port': os.getenv('DB_PORT', '5432'),
-            'database': os.getenv('DB_NAME', 'keycloak'),
+            'database': os.getenv('KEYCLOAK_DB_NAME', 'keycloak'),
             'user': os.getenv('DB_USER', 'postgres'),
             'password': os.getenv('DB_PASSWORD', 'postgres'),
         }
@@ -44,7 +50,7 @@ class DatabaseConfig:
             self.project_config = {
                 'host': os.getenv('DB_HOST', 'localhost'),
                 'port': os.getenv('DB_PORT', '5432'),
-                'database': os.getenv('DB_NAME', f'{project}'),
+                'database': os.getenv('DB_NAME', project),
                 'user': os.getenv('DB_USER', 'postgres'),
                 'password': os.getenv('DB_PASSWORD', 'postgres'),
             }
@@ -53,6 +59,7 @@ class PathConfig:
     def __init__(self, project: str) -> None:
         self.base_path = Path(f'{Constants.AIRC_DEV_PATH}/{project}').expanduser()
         self.e2e_db_path = Path(f'{Constants.AIRC_DEV_PATH}/{project}/{project}-frontend/cypress/plugins/resources').expanduser()
+        self.e2e_features_path = Path(f'{Constants.AIRC_DEV_PATH}/{project}/{project}-frontend/cypress/e2e').expanduser()
         self.cypress_config_local = Path(f'{Constants.AIRC_DEV_PATH}/{project}/{project}-frontend/cypress.config.local.ts').expanduser()
 
 class DatabaseManager:
@@ -63,8 +70,8 @@ class DatabaseManager:
         self.project_pool = None
 
     def __enter__(self):
-        self.keycloak_pool = pool.SimpleConnectionPool(1, 20, **self.keycloak_config)
-        self.project_pool = pool.SimpleConnectionPool(1, 20, **self.project_config)
+        self.keycloak_pool = pool.SimpleConnectionPool(1, 3, **self.keycloak_config)
+        self.project_pool = pool.SimpleConnectionPool(1, 3, **self.project_config)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -137,24 +144,25 @@ class FileManager:
         return list(directory.rglob("*.sql"))
 
     @staticmethod
-    def replace_in_file(file_path: Path, old_text: str, new_text: str) -> None:
+    def replace_in_file(file_path: Path, replacements: Dict[str, str]) -> None:
         with fileinput.FileInput(str(file_path), inplace=True) as file:
             for line in file:
-                print(line.replace(old_text, new_text), end='')
+                for old, new in replacements.items():
+                    line = line.replace(old, new)
+                print(line, end='')
 
     @staticmethod
     def update_cypress_config(config_file: Path, project: str, schema: str, reverse: bool = False) -> None:
         try:
             with open(config_file, 'r') as file:
                 content = file.read()
-
-            pattern = r'//\s*(config\.env\.' + project.upper() + '_URL\s*=.*?)(\n)(config\.env\.' + project.upper() + '_URL\s*=.*?)(\n)'
+            pattern = rf'//\s*(config\.env\.{project.upper()}_URL\s*=.*?)(\n)(config\.env\.{project.upper()}_URL\s*=.*?)(\n)'
             if reverse:
                 content = re.sub(pattern, r'\1\2', content)
             else:
                 content = re.sub(
-                    r'(config\.env\.' + project.upper() + '_URL\s*=.*?)(\n)',
-                    r'// \1\2' + f"config.env.{project.upper()}_URL = 'http://localhost/{project}/#/{schema}';\n",
+                    rf'(config\.env\.{project.upper()}_URL\s*=.*?)(\n)',
+                    rf'// \1\2config.env.{project.upper()}_URL = "http://localhost/{project}/#/{schema}";\n',
                     content
                 )
 
@@ -164,12 +172,13 @@ class FileManager:
             logger.error(f"Error updating Cypress config: {e}")
 
 def validate_schema_name(schema_name: str) -> bool:
-    return schema_name.isalnum()
+    return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', schema_name))
 
-def confirm_replacement(e2e_db_path: Path, e2e_schema: str, my_schema: str, e2e_user: str, user_id: str) -> bool:
+def confirm_replacement(e2e_db_path: Path, e2e_schema: str, my_schema: str, e2e_user: str, user_id: str, e2e_login: str, my_login: str) -> bool:
     logger.info(f"In {e2e_db_path}")
     logger.info(f"Replacing schema: {e2e_schema} for {my_schema}")
     logger.info(f"Replacing user ID: {e2e_user} for {user_id}")
+    logger.info(f"Replacing login: {e2e_login} for {my_login}")
     consent = input("Do you want to proceed with the replacements? (y/N): ")
     return consent.lower() == 'y'
 
@@ -178,8 +187,10 @@ def main():
     parser.add_argument('-schema', help='Schema name to use', default=Constants.DEFAULT_SCHEMA)
     parser.add_argument('-project', help='Project name to use', default=Constants.DEFAULT_PROJECT)
     parser.add_argument('-login', help='Login to use', default=Constants.DEFAULT_LOGIN)
+    parser.add_argument('-password', help='Password to use', default=Constants.DEFAULT_PASS)
     parser.add_argument('-e2euser', help='User id to replace', default=Constants.DEFAULT_E2E_USER_ID)
     parser.add_argument('-e2eschema', help='Schema to replace', default=Constants.DEFAULT_E2E_SCHEMA)
+    parser.add_argument('-e2elogin', help='Login email to replace', default=Constants.DEFAULT_E2E_LOGIN)
     parser.add_argument('-getid', help='Get user id', action='store_true')
     parser.add_argument('-reverse', help='Reverse operation', action='store_true')
 
@@ -207,13 +218,16 @@ def main():
         tmp_schema = f"{my_schema}-tmp"
         e2e_schema = args.e2eschema
         e2e_user = args.e2euser
+        e2e_login = args.e2elogin
+        my_login = args.login
 
         if args.reverse:
             e2e_schema, my_schema = my_schema, e2e_schema
             e2e_user, user_id = user_id, e2e_user
+            e2e_login, my_login = my_login, e2e_login
             logger.info("Reversing replacements...")
 
-            if not confirm_replacement(paths.e2e_db_path, e2e_schema, my_schema, e2e_user, user_id):
+            if not confirm_replacement(paths.e2e_db_path, e2e_schema, my_schema, e2e_user, user_id, e2e_login, my_login):
                 logger.info("Operation cancelled by user.")
                 sys.exit(0)
 
@@ -225,7 +239,7 @@ def main():
                 logger.error(f"Failed to rename schema {tmp_schema} to {e2e_schema}")
                 sys.exit(1)
         else:
-            if not confirm_replacement(paths.e2e_db_path, e2e_schema, my_schema, e2e_user, user_id):
+            if not confirm_replacement(paths.e2e_db_path, e2e_schema, my_schema, e2e_user, user_id, e2e_login, my_login):
                 logger.info("Operation cancelled by user.")
                 sys.exit(0)
 
@@ -233,18 +247,18 @@ def main():
                 logger.error(f"Failed to rename schema {my_schema}")
                 sys.exit(1)
 
-        file_manager = FileManager()
         FileManager.update_cypress_config(paths.cypress_config_local, args.project, my_schema, args.reverse)
 
-        for file_path in file_manager.find_files(paths.e2e_db_path):
-            # logger.info(f"Processing file: {file_path}")
-            file_manager.replace_in_file(file_path, f"'{e2e_schema}'", f"'{my_schema}'")
-            file_manager.replace_in_file(file_path, e2e_user, user_id)
-
+        replacements = {
+            f"'{e2e_schema}'": f"'{my_schema}'",
+            e2e_user: user_id,
+            e2e_login: my_login,
+        }
+        for file_path in FileManager.find_files(paths.e2e_db_path):
+            FileManager.replace_in_file(file_path, replacements)
         logger.info("Operation completed successfully\nPlease restart the backend service to apply changes.")
 
 if __name__ == "__main__":
     main()
 
-    # @Me TODO Replace email login in sql files
     # @Me TODO History of changes
